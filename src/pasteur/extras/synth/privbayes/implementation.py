@@ -385,6 +385,8 @@ def greedy_bayes(
 
     d = len(todo)
     EMPTY_HASH = tuple(-1 for _ in range(len(val_idx)))
+    # Pre-build dict for O(1) index lookup (replaces O(n) list.index())
+    _val_idx_lookup = {v: i for i, v in enumerate(val_idx)}
 
     has_deps = True
     if len(ds_attrs) == 1:
@@ -565,11 +567,11 @@ def greedy_bayes(
                         table, aname, phs = sel
                         if isinstance(phs, dict):
                             for p, ph in phs.items():
-                                cand_hash[val_idx.index((table, p))] = ph
+                                cand_hash[_val_idx_lookup[(table, p)]] = ph
                         else:
                             cmn = get_attrs(ds_attrs, table)[aname].common
                             assert cmn is not None
-                            cand_hash[val_idx.index((table, cmn.name))] = phs
+                            cand_hash[_val_idx_lookup[(table, cmn.name)]] = phs
                 candidates.append((val, mar, (val, tuple(cand_hash))))
             if not psets:
                 candidates.append((val, [], (val, EMPTY_HASH)))
