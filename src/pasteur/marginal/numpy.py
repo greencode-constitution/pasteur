@@ -103,7 +103,7 @@ def _map_column(table: pd.DataFrame, col: CatValue, common: CatValue | None):
         domains.append(domain)
 
         col_lvl = col.get_mapping(height)[table[col.name]]
-        col_lvl = col_lvl.astype(get_dtype(domain))
+        col_lvl = np.asarray(col_lvl, dtype=get_dtype(domain)).ravel()
         cols.append(col_lvl)
 
         if common_num > 0:
@@ -270,14 +270,14 @@ def calc_marginal(
             for i, (n, h) in enumerate(reversed(sel.items())):
                 if common == 0 or i == 0:
                     np.multiply(
-                        data[(table, n, False)][h].reshape(-1),
+                        data[(table, n, False)][h],
                         mul * l_mul,
                         out=_tmp_nd,
                         dtype=dtype,
                     )
                 else:
                     np.multiply(
-                        data[(table, n, True)][h].reshape(-1),
+                        data[(table, n, True)][h],
                         mul * l_mul,
                         out=_tmp_nd,
                         dtype=dtype,
@@ -288,7 +288,7 @@ def calc_marginal(
             mul *= l_mul + common
         else:
             np.multiply(
-                data[(table, info.common_names[(table, attr)], False)][sel].reshape(-1),
+                data[(table, info.common_names[(table, attr)], False)][sel],
                 mul,
                 out=_tmp_nd,
                 dtype=dtype,
