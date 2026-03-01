@@ -596,6 +596,101 @@ def _get_partition_keys(
     return sorted(set(ids[top_table]().index))
 
 
+def _collect_child_seqs(mapping: TableMapping) -> dict[str, str]:
+    """Collect seq column names for each child table from the mapping."""
+    seqs: dict[str, str] = {}
+    for value in mapping.values():
+        if isinstance(value, ChildMapping):
+            if value.seq:
+                seqs[value.name] = value.seq
+            seqs.update(_collect_child_seqs(value.child))
+    return seqs
+
+
+def _process_entity_fast(
+    table: str,
+    cid: int,
+    mapping: TableMapping,
+    t_cols: dict[str, dict[str, np.ndarray]],
+    t_pos: dict[str, dict],
+    t_empty: dict[str, bool],
+    c_cols: dict[str, dict[str, dict[str, np.ndarray]]],
+    c_pos: dict[str, dict[str, dict]],
+    d_children: dict[tuple[str, str], dict[int, list[int]]],
+) -> dict:
+    """Optimized version of process_entity using pre-computed numpy arrays
+    instead of pandas .loc indexing and DataFrame comparisons."""
+    result = {}
+    stack = [(table, cid, mapping, result)]
+
+    while stack:
+        table, cid, mapping, current = stack.pop()
+
+        # Build cached as (col_arrays, position) tuples for fast access
+        cached: dict = {}
+        if not t_empty.get(table, False):
+            pos = t_pos[table].get(cid)
+            if pos is not None:
+                cached[None] = (t_cols[table], pos)
+
+        for k, cp in c_pos.items():
+            tp = cp.get(table)
+            if tp is not None:
+                p = tp.get(cid)
+                if p is not None:
+                    cached[k] = (c_cols[k][table], p)
+
+        for key, value in mapping.items():
+            if isinstance(value, NumMapping):
+                cols, pos = cached[value.table]
+                v = float(cols[value.name][pos])
+                # clip to .4f
+                try:
+                    current[key] = (int(v * 10000) / 10000) if v % 1 != 0 else int(v)
+                except Exception:
+                    current[key] = None
+            elif isinstance(value, CatMapping):
+                cols, pos = cached[value.table]
+                current[key] = value.mapping[int(cols[value.name][pos])]
+            elif isinstance(value, AttrMapping):
+                if value.table not in cached:
+                    current[key] = None
+                    continue
+                current[key] = {}
+                for subkey, subvalue in value.cols.items():
+                    assert subvalue.table in cached
+                    if subkey.startswith(f"{key}_"):
+                        subkey = subkey[len(key) + 1 :]
+
+                    cols, pos = cached[subvalue.table]
+                    v = cols[subvalue.name][pos]
+                    if isinstance(subvalue, NumMapping):
+                        if value.nullable and pd.isna(v):
+                            current[key] = None
+                            break
+                        current[key][subkey] = float(v) if v % 1 != 0 else int(v)
+                    elif isinstance(subvalue, CatMapping):
+                        if value.nullable and not v:
+                            current[key] = None
+                            break
+                        current[key][subkey] = subvalue.mapping[int(v)]
+                    else:
+                        assert False, f"Unexpected subvalue type: {type(subvalue)}"
+            elif isinstance(value, ChildMapping):
+                # Use pre-built children map (replaces per-entity DataFrame comparison)
+                child_ids = d_children.get((value.name, table), {}).get(cid, [])
+                children = []
+                for ccid in child_ids:
+                    child = {}
+                    stack.append((value.name, ccid, value.child, child))
+                    children.append(child)
+                current[key] = children
+            else:
+                assert False, f"Unexpected value type: {type(value)}"
+
+    return result
+
+
 def _json_encode(
     tables: dict[str, LazyChunk],
     ctx: dict[str, dict[str, LazyChunk]],
@@ -616,17 +711,62 @@ def _json_encode(
     top_table = get_top_table(relationships, ids)
 
     mapping = create_table_mapping(top_table, relationships, attrs, ctx_attrs)
-    out = []
 
+    # Pre-compute numpy array lookups for fast entity access
+    # Each table becomes {col_name: numpy_array} + {cid: position}
+    # This avoids per-entity pandas .loc (Series creation) and to_dict overhead
+    t_cols: dict[str, dict[str, np.ndarray]] = {}
+    t_pos: dict[str, dict] = {}
+    t_empty: dict[str, bool] = {}
+    for tname, df in l_tables.items():
+        t_cols[tname] = {col: df[col].values for col in df.columns}
+        t_pos[tname] = dict(zip(df.index, range(len(df))))
+        t_empty[tname] = df.empty
+
+    c_cols: dict[str, dict[str, dict[str, np.ndarray]]] = {}
+    c_pos: dict[str, dict[str, dict]] = {}
+    for k, v in l_ctx.items():
+        c_cols[k] = {}
+        c_pos[k] = {}
+        for tname, df in v.items():
+            c_cols[k][tname] = {col: df[col].values for col in df.columns}
+            c_pos[k][tname] = dict(zip(df.index, range(len(df))))
+
+    # Pre-build children map: (child_table, parent_col) -> {parent_id: [child_ids]}
+    # Uses np.lexsort for bulk sorting instead of per-group Python sort with lambdas
+    child_seqs = _collect_child_seqs(mapping)
+    d_children: dict[tuple[str, str], dict[int, list[int]]] = {}
+    for tname, id_df in l_ids.items():
+        for pcol in id_df.columns:
+            pvals = id_df[pcol].values
+            cidx = id_df.index.values
+
+            # Pre-sort all children by seq using numpy lexsort (single bulk operation)
+            seq = child_seqs.get(tname)
+            if seq and tname in l_tables and seq in l_tables[tname].columns:
+                seq_vals = l_tables[tname][seq].reindex(id_df.index).values
+                order = np.lexsort((seq_vals, pvals))
+                pvals = pvals[order]
+                cidx = cidx[order]
+
+            cmap: dict[int, list[int]] = defaultdict(list)
+            for i in range(len(pvals)):
+                cmap[int(pvals[i])].append(cidx[i])
+            d_children[(tname, pcol)] = dict(cmap)
+
+    out = []
     for id in nrange:
         out.append(
-            process_entity(
+            _process_entity_fast(
                 top_table,
                 id,
                 mapping,
-                l_tables,
-                l_ctx,
-                l_ids,
+                t_cols,
+                t_pos,
+                t_empty,
+                c_cols,
+                c_pos,
+                d_children,
             )
         )
 
