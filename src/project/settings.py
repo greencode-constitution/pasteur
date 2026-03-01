@@ -84,5 +84,5 @@ PASTEUR_MODULES = get_recommended_modules() + [
     JsonEncoder.get_factory(),
     AmalgamSynth.get_factory(PrivBayesMare),
     FlatEncoder.get_factory(),
-    LlmEvaluatorMetric.get_factory(),
+    # LlmEvaluatorMetric.get_factory(),
 ]
