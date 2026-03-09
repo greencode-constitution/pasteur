@@ -119,8 +119,10 @@ def maximal_parents(domains: list[list[int]], tau: float) -> list[tuple[int, ...
     avoids unecessary overhead incurred by the original version
     (set allocation, recursion, hashing)."""
 
+    import math
+
     MULT = (1 << 16) - 1
-    to_log = lambda a: int(np.log(a) * MULT)
+    to_log = lambda a: int(math.log(a) * MULT)
 
     out = []
     heights = [len(d) for d in domains]
@@ -297,6 +299,9 @@ def greedy_bayes(
             tcombos, tval_to_idx = calculate_attrs_combinations(t, table_attrs)
             combos.update(tcombos)
             val_idx.extend(tval_to_idx)
+
+    # Build O(1) lookup dict from val_idx list
+    val_idx_map = {v: i for i, v in enumerate(val_idx)}
 
     #
     # Implement misc functions for summating the scores
@@ -565,11 +570,11 @@ def greedy_bayes(
                         table, aname, phs = sel
                         if isinstance(phs, dict):
                             for p, ph in phs.items():
-                                cand_hash[val_idx.index((table, p))] = ph
+                                cand_hash[val_idx_map[(table, p)]] = ph
                         else:
                             cmn = get_attrs(ds_attrs, table)[aname].common
                             assert cmn is not None
-                            cand_hash[val_idx.index((table, cmn.name))] = phs
+                            cand_hash[val_idx_map[(table, cmn.name)]] = phs
                 candidates.append((val, mar, (val, tuple(cand_hash))))
             if not psets:
                 candidates.append((val, [], (val, EMPTY_HASH)))
