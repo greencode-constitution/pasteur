@@ -377,7 +377,7 @@ def _init_pool(max_workers: int | None = None, refresh_processes: int | None = N
 
     close_pool()
 
-    ctx = get_context("spawn")
+    ctx = get_context("forkserver")
     manager = ctx.Manager()
     _max_workers = max_workers or cpu_count() or 1
 
@@ -477,8 +477,8 @@ def process_in_parallel(
     from multiprocessing import Lock, Pipe
 
     if (
-        # len(per_call_args) < 2 * min_chunk_size
-        not MULTIPROCESS_ENABLE
+        len(per_call_args) < 2 * max(min_chunk_size, _max_workers)
+        or not MULTIPROCESS_ENABLE
         or IS_SUBPROCESS
     ):
         if initializer is not None:
