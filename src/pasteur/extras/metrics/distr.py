@@ -269,14 +269,13 @@ def _visualise_basetable(
 
             vnames = [process_names(v) for v in vnames]
 
+            mapping_arr = np.array(hval.get_mapping(height))
             for i, vname in enumerate(vnames):
+                mask = mapping_arr == i
                 for sname, split in splits.items():
-                    nsum = np.sum(split[name])
-
-                    mval = 0
-                    for j, v in enumerate(hval.get_mapping(height)):
-                        if v == i:
-                            mval += split[name][j]
+                    split_data = split[name]
+                    nsum = np.sum(split_data)
+                    mval = np.sum(split_data[mask])
 
                     rate = mval / nsum
 
@@ -344,6 +343,8 @@ def _visualise_2way(
     results = {}
     presults = {}
 
+    zfill = lambda x: (x + KL_ZERO_FILL) / np.sum(x + KL_ZERO_FILL)
+
     ref_split = next(iter(data.values()))
     ref_split = Summaries(ref_split.wrk, ref_split.ref, ref_split.ref)
     for name, split in {
@@ -363,7 +364,6 @@ def _visualise_2way(
                 p = None
 
             if metr == "kl":
-                zfill = lambda x: (x + KL_ZERO_FILL) / np.sum(x + KL_ZERO_FILL)
                 k = zfill(wrk[key])
                 j = zfill(syn[key])
 
@@ -747,54 +747,31 @@ class DistributionMetric(Metric[DistrSummary, DistrSummary]):
 
         overall_metr = {}
         for name in self.domain:
-            # start = time.perf_counter()
-            _visualise_cs(
-                name,
-                self.domain[name],
-                {
-                    k: Summaries(
-                        wrk=v.wrk[name][0],
-                        ref=v.ref[name][0],
-                        syn=v.syn[name][0] if v.syn else None,
-                    )
-                    for k, v in data.items()
-                },
-            )
-            # logger.info(f"cs {name} {time.perf_counter()-start:.2f}s")
+            oneway_data = {
+                k: Summaries(
+                    wrk=v.wrk[name][0],
+                    ref=v.ref[name][0],
+                    syn=v.syn[name][0] if v.syn else None,
+                )
+                for k, v in data.items()
+            }
+            _visualise_cs(name, self.domain[name], oneway_data)
+            _visualise_basetable(name, self.attrs[name], oneway_data)
 
-            # start = time.perf_counter()
-            _visualise_basetable(
-                name,
-                self.attrs[name],
-                {
-                    k: Summaries(
-                        wrk=v.wrk[name][0],
-                        ref=v.ref[name][0],
-                        syn=v.syn[name][0] if v.syn else None,
-                    )
-                    for k, v in data.items()
-                },
-            )
-            # logger.info(f"bs {name} {time.perf_counter()-start:.2f}s")
-
+            twoway_data = {
+                k: Summaries(
+                    wrk=v.wrk[name][1],
+                    ref=v.ref[name][1],
+                    syn=v.syn[name][1] if v.syn else None,
+                )
+                for k, v in data.items()
+            }
             for metric in METRICS:
                 if metric not in overall_metr:
                     overall_metr[metric] = {}
-                # start = time.perf_counter()
                 overall_metr[metric][name] = _visualise_2way(
-                    name,
-                    {
-                        k: Summaries(
-                            wrk=v.wrk[name][1],
-                            ref=v.ref[name][1],
-                            syn=v.syn[name][1] if v.syn else None,
-                        )
-                        for k, v in data.items()
-                    },
-                    metric,
-                    domain=self.domain,
+                    name, twoway_data, metric, domain=self.domain,
                 )
-                # logger.info(f"2w {metric} {name} {time.perf_counter()-start:.2f}s")
 
         from pasteur.utils.styles import use_style
         import matplotlib.pyplot as plt
