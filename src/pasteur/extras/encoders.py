@@ -588,6 +588,86 @@ def process_entity(
     return result
 
 
+def _process_entity_dict(
+    table: str,
+    cid: int,
+    mapping: TableMapping,
+    tables_dict: dict[str, dict],
+    ctx_dict: dict[str, dict[str, dict]],
+    ids_children: dict[str, dict[str, dict[int, list[int]]]],
+    seq_dicts: dict[str, dict[int, Any]],
+) -> dict:
+    """Dict-based version of process_entity that avoids pandas overhead.
+
+    Instead of DataFrame.loc[] and Series[] lookups, uses plain dict lookups
+    for O(1) access without pandas object creation overhead."""
+    import math
+
+    result = {}
+    stack = [(table, cid, mapping, result)]
+
+    while stack:
+        table, cid, mapping, current = stack.pop()
+        cached = {}
+        row = tables_dict[table].get(cid)
+        cached[None] = row
+        for k, v in ctx_dict.items():
+            if table in v and cid in v[table]:
+                cached[k] = v[table][cid]
+
+        for key, value in mapping.items():
+            if isinstance(value, NumMapping):
+                v = float(cached[value.table][value.name])
+                try:
+                    current[key] = (int(v * 10000) / 10000) if v % 1 != 0 else int(v)
+                except Exception:
+                    current[key] = None
+            elif isinstance(value, CatMapping):
+                current[key] = value.mapping[int(cached[value.table][value.name])]
+            elif isinstance(value, AttrMapping):
+                if value.table not in cached:
+                    current[key] = None
+                    continue
+                current[key] = {}
+                for subkey, subvalue in value.cols.items():
+                    if subkey.startswith(f"{key}_"):
+                        subkey = subkey[len(key) + 1 :]
+
+                    v = cached[subvalue.table][subvalue.name]
+                    if isinstance(subvalue, NumMapping):
+                        if value.nullable and (v is None or (isinstance(v, float) and math.isnan(v))):
+                            current[key] = None
+                            break
+                        current[key][subkey] = float(v) if v % 1 != 0 else int(v)
+                    elif isinstance(subvalue, CatMapping):
+                        if value.nullable and not v:
+                            current[key] = None
+                            break
+                        current[key][subkey] = subvalue.mapping[
+                            int(cached[subvalue.table][subvalue.name])
+                        ]
+                    else:
+                        assert False, f"Unexpected subvalue type: {type(subvalue)}"
+            elif isinstance(value, ChildMapping):
+                child_lookup = ids_children.get(value.name, {}).get(table, {})
+                cids_list = child_lookup.get(cid, [])
+
+                if value.seq:
+                    seq_dict = seq_dicts[value.name]
+                    cids_list = sorted(cids_list, key=lambda c: seq_dict.get(c, 0))
+
+                children = []
+                for child_cid in cids_list:
+                    child = {}
+                    stack.append((value.name, child_cid, value.child, child))
+                    children.append(child)
+                current[key] = children
+            else:
+                assert False, f"Unexpected value type: {type(value)}"
+
+    return result
+
+
 def _get_partition_keys(
     ids: dict[str, LazyChunk],
     relationships: dict[str, list[str]],
@@ -616,17 +696,51 @@ def _json_encode(
     top_table = get_top_table(relationships, ids)
 
     mapping = create_table_mapping(top_table, relationships, attrs, ctx_attrs)
-    out = []
 
+    # Pre-convert DataFrames to dicts for O(1) access
+    tables_dict = {}
+    for k, df in l_tables.items():
+        if not df.empty:
+            tables_dict[k] = df.to_dict("index")
+        else:
+            tables_dict[k] = {}
+
+    ctx_dict = {}
+    for k, v in l_ctx.items():
+        ctx_dict[k] = {}
+        for kk, df in v.items():
+            if not df.empty:
+                ctx_dict[k][kk] = df.to_dict("index")
+            else:
+                ctx_dict[k][kk] = {}
+
+    # Pre-build child ID lookups: ids_children[child_table][parent_col] -> {parent_id: [child_ids]}
+    ids_children = {}
+    for child_name, id_df in l_ids.items():
+        ids_children[child_name] = {}
+        for parent_col in id_df.columns:
+            lookup = defaultdict(list)
+            for child_id, parent_id in zip(id_df.index, id_df[parent_col]):
+                lookup[parent_id].append(child_id)
+            ids_children[child_name][parent_col] = dict(lookup)
+
+    # Pre-build seq value dicts for sorting
+    seq_dicts = {}
+    for k, df in l_tables.items():
+        for col in df.columns:
+            seq_dicts[k] = dict(zip(df.index, df[col]))
+
+    out = []
     for id in nrange:
         out.append(
-            process_entity(
+            _process_entity_dict(
                 top_table,
                 id,
                 mapping,
-                l_tables,
-                l_ctx,
-                l_ids,
+                tables_dict,
+                ctx_dict,
+                ids_children,
+                seq_dicts,
             )
         )
 
