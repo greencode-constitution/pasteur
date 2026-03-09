@@ -139,8 +139,14 @@ def gen_html_table(table, font_size: str = "18px") -> str:
     )
 
 
+_style_loaded = False
+
 def load_matplotlib_style():
+    global _style_loaded
+    if _style_loaded:
+        return
     use_style("mlflow")
+    _style_loaded = True
 
 
 def color_dataframe(
